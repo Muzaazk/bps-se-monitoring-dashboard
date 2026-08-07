@@ -1,0 +1,10 @@
+**/*.xlsx
+**/*.csv
+**/*.md
+**/*.json
+!appsscript.json
+**/*.zip
+**/node_modules/**
+**/.git/**
+audit_*.js
+*.js

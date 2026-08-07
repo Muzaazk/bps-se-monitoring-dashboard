@@ -1,0 +1,121 @@
+<!-- Compare.html -->
+<div id="view-compare" class="page-view">
+  <!-- Header Row -->
+  <div class="nav-header-row">
+    <div>
+      <h2 style="font-weight: 800; font-size: 1.25rem; color: var(--primary); margin-bottom: 4px;">Perbandingan Wilayah (Compare Region)</h2>
+      <div style="font-size: 0.85rem; color: var(--text-muted);">
+        Bandingkan progres dan proporsi usaha antarwilayah administratif pada tingkat yang sama.
+      </div>
+    </div>
+  </div>
+
+  <!-- Selection Panel -->
+  <div class="compare-panel">
+    <div class="compare-selector-grid">
+      <!-- Level Selector -->
+      <div class="select-group">
+        <label for="compare-level-select">Tingkat Administrasi</label>
+        <select id="compare-level-select" class="form-control" onchange="onCompareLevelChange()">
+          <option value="1" selected>Kecamatan</option>
+          <option value="2">Desa/Kelurahan</option>
+        </select>
+      </div>
+
+      <!-- Multi-select Dropdown for Regions -->
+      <div class="select-group">
+        <label>Pilih Wilayah (Minimal 2)</label>
+        <div class="multi-select-container">
+          <div class="multi-select-trigger" id="compare-regions-trigger" onclick="toggleCompareDropdown(event)">
+            <span>Pilih wilayah...</span>
+            <i class="fas fa-chevron-down"></i>
+          </div>
+          <div class="multi-select-dropdown" id="compare-regions-dropdown">
+            <!-- Populated dynamically via JS -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Compare Trigger Button -->
+      <div>
+        <button class="btn btn-accent" id="btn-run-compare" onclick="runCompare()" style="height: 42px; padding: 0 24px;">
+          <i class="fas fa-balance-scale"></i> Bandingkan
+        </button>
+      </div>
+    </div>
+
+    <!-- Active Selections list -->
+    <div id="compare-selected-badges" style="display: flex; flex-wrap: wrap; gap: 8px;">
+      <!-- Selected tags shown here -->
+    </div>
+  </div>
+
+  <!-- Comparison Results Panel (Hidden by default) -->
+  <div id="compare-results-section" style="display: none;">
+    <!-- Comparison Cards Row -->
+    <div class="dashboard-grid" id="compare-kpis-container">
+      <!-- Injected by script -->
+    </div>
+
+    <!-- Comparison Charts Grid -->
+    <div class="chart-section-grid">
+      <!-- Progres Compare Chart -->
+      <div class="chart-card" style="grid-column: span 2;">
+        <div class="chart-header">
+          <div class="chart-title"><i class="fas fa-chart-bar" style="margin-right: 6px;"></i>Perbandingan Progres Pendataan (%)</div>
+        </div>
+        <div class="chart-container">
+          <canvas id="chart-compare-progress"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="chart-section-grid">
+      <!-- Skala Usaha Grouped Chart -->
+      <div class="chart-card">
+        <div class="chart-header">
+          <div class="chart-title"><i class="fas fa-industry" style="margin-right: 6px;"></i>Komparasi Skala Usaha BKU (Prelist)</div>
+        </div>
+        <div class="chart-container">
+          <canvas id="chart-compare-skala"></canvas>
+        </div>
+      </div>
+
+      <!-- Sektor Grouped Chart -->
+      <div class="chart-card">
+        <div class="chart-header">
+          <div class="chart-title"><i class="fas fa-seedling" style="margin-right: 6px;"></i>Komparasi Sektor Pertanian vs Non-Pertanian</div>
+        </div>
+        <div class="chart-container">
+          <canvas id="chart-compare-sektor"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Comparison Table Card -->
+    <div class="table-card">
+      <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--primary); margin-bottom: 16px; border-bottom: 1px solid #f1f3f5; padding-bottom: 10px;">
+        <i class="fas fa-table" style="margin-right: 6px;"></i>Tabel Data Perbandingan Lengkap
+      </h3>
+      <div class="table-scroll-container">
+        <table class="bps-data-table" id="compare-data-table">
+          <thead>
+            <!-- Headers injected dynamically -->
+          </thead>
+          <tbody id="compare-data-table-body">
+            <!-- Rows injected dynamically -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Compare View Empty State -->
+  <div id="compare-empty-state" class="table-card" style="padding: 60px 24px; text-align: center;">
+    <i class="fas fa-balance-scale" style="font-size: 3.5rem; color: rgba(0, 0, 0, 0.05); margin-bottom: 16px;"></i>
+    <h3 style="font-weight: 700; color: var(--text-main); margin-bottom: 6px;">Belum Ada Perbandingan</h3>
+    <p style="color: var(--text-muted); max-width: 450px; margin: 0 auto; font-size: 0.88rem;">
+      Silakan pilih tingkat administrasi dan minimal dua wilayah di atas, kemudian klik tombol "Bandingkan" untuk melihat visualisasi dan analitik perbandingan.
+    </p>
+  </div>
+</div>

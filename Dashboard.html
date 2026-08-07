@@ -1,0 +1,157 @@
+<!-- Dashboard.html -->
+<div id="view-dashboard" class="page-view active">
+  <!-- Active Region Header -->
+  <div class="nav-header-row">
+    <div>
+      <h2 style="font-weight: 800; font-size: 1.25rem; color: var(--primary); margin-bottom: 4px;">Dashboard Analitik</h2>
+      <div style="font-size: 0.85rem; color: var(--text-muted);">
+        <i class="fas fa-map-marker-alt" style="color: var(--accent); margin-right: 4px;"></i>
+        Wilayah Aktif: <strong id="db-active-region-label" style="color: var(--text-main);">MEMUAT...</strong>
+      </div>
+    </div>
+    <div id="dashboard-breadcrumb-container">
+      <!-- Breadcrumb will be dynamically generated here -->
+    </div>
+  </div>
+
+  <!-- KPI Indicators Grid -->
+  <div class="dashboard-grid">
+    <!-- Card Prelist -->
+    <div class="kpi-card">
+      <div class="kpi-info">
+        <h4>Total Prelist</h4>
+        <div class="kpi-value" id="kpi-prelist-val">-</div>
+        <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">Usaha & Keluarga</div>
+      </div>
+      <div class="kpi-icon"><i class="fas fa-list-ol"></i></div>
+    </div>
+    
+    <!-- Card Didata -->
+    <div class="kpi-card success">
+      <div class="kpi-info">
+        <h4>Responden Didata</h4>
+        <div class="kpi-value" id="kpi-didata-val">-</div>
+        <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">Target selesai</div>
+      </div>
+      <div class="kpi-icon"><i class="fas fa-check-circle"></i></div>
+    </div>
+    
+    <!-- Card Draft -->
+    <div class="kpi-card warning">
+      <div class="kpi-info">
+        <h4>Draft (Sedang Didata)</h4>
+        <div class="kpi-value" id="kpi-draft-val">-</div>
+        <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">Penyelesaian draft</div>
+      </div>
+      <div class="kpi-icon"><i class="fas fa-edit"></i></div>
+    </div>
+    
+    <!-- Card Progress Percentage -->
+    <div class="kpi-card accent">
+      <div class="kpi-info">
+        <h4>Progress Pendataan</h4>
+        <div class="kpi-value" id="kpi-progress-val">-%</div>
+        <div style="font-size: 0.72rem; width: 150px; background-color: #e9ecef; border-radius: 4px; height: 6px; margin-top: 8px; overflow: hidden;">
+          <div id="kpi-progress-bar" style="background-color: var(--accent); width: 0%; height: 100%; transition: width 0.5s;"></div>
+        </div>
+      </div>
+      <div class="kpi-icon"><i class="fas fa-chart-pie"></i></div>
+    </div>
+  </div>
+
+  <!-- Charts Visualizations -->
+  <div class="chart-section-grid">
+    <!-- Chart Progres Sub Wilayah -->
+    <div class="chart-card" style="grid-column: span 2;">
+      <div class="chart-header">
+        <div class="chart-title"><i class="fas fa-chart-bar" style="margin-right: 6px;"></i>Progres Penyelesaian per Wilayah Bawahan (%)</div>
+        <div style="font-size: 0.78rem; color: var(--text-muted);" id="child-level-label">Level Kecamatan</div>
+      </div>
+      <div class="chart-container">
+        <canvas id="chart-subregions-progress"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="chart-section-grid">
+    <!-- Chart Skala Usaha -->
+    <div class="chart-card">
+      <div class="chart-header">
+        <div class="chart-title"><i class="fas fa-industry" style="margin-right: 6px;"></i>Proporsi Prelist Skala Usaha BKU</div>
+      </div>
+      <div class="chart-container">
+        <canvas id="chart-skala-usaha"></canvas>
+      </div>
+      <div id="chart-skala-usaha-legend-fallback" style="margin-top: 16px; font-size: 0.78rem; display: flex; flex-direction: column; gap: 4px;">
+        <!-- Dynamic legend values -->
+      </div>
+    </div>
+
+    <!-- Chart Proporsi Sektor -->
+    <div class="chart-card">
+      <div class="chart-header">
+        <div class="chart-title"><i class="fas fa-seedling" style="margin-right: 6px;"></i>Proporsi Sektor Usaha BKU & Keluarga</div>
+      </div>
+      <div class="chart-container">
+        <canvas id="chart-sektor-usaha"></canvas>
+      </div>
+      <div id="chart-sektor-legend-fallback" style="margin-top: 16px; font-size: 0.78rem; display: flex; flex-direction: column; gap: 4px;">
+        <!-- Dynamic legend values -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Analytics and Statistics Section -->
+  <div class="analytics-grid">
+    <!-- Top 10 Wilayah -->
+    <div class="analytics-card">
+      <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--primary); margin-bottom: 12px; border-bottom: 1px solid #f1f3f5; padding-bottom: 10px;">
+        <i class="fas fa-arrow-up" style="color: var(--success); margin-right: 6px;"></i>10 Wilayah Bawahan Tertinggi
+      </h3>
+      <div class="analytics-list" id="analytics-top-list">
+        <!-- Dynamic list -->
+        <div class="empty-state">Memuat analitik...</div>
+      </div>
+    </div>
+
+    <!-- Bottom 10 Wilayah -->
+    <div class="analytics-card">
+      <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--primary); margin-bottom: 12px; border-bottom: 1px solid #f1f3f5; padding-bottom: 10px;">
+        <i class="fas fa-arrow-down" style="color: var(--danger); margin-right: 6px;"></i>10 Wilayah Bawahan Terendah
+      </h3>
+      <div class="analytics-list" id="analytics-bottom-list">
+        <!-- Dynamic list -->
+        <div class="empty-state">Memuat analitik...</div>
+      </div>
+    </div>
+
+    <!-- Statistik Agregat -->
+    <div class="analytics-card">
+      <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--primary); margin-bottom: 12px; border-bottom: 1px solid #f1f3f5; padding-bottom: 10px;">
+        <i class="fas fa-calculator" style="color: var(--accent); margin-right: 6px;"></i>Statistik Deskriptif Bawahan
+      </h3>
+      <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed #e9ecef; padding-bottom: 8px;">
+          <span style="font-size: 0.88rem; color: var(--text-muted);">Jumlah Wilayah</span>
+          <strong style="font-size: 0.95rem;" id="stat-count-val">-</strong>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed #e9ecef; padding-bottom: 8px;">
+          <span style="font-size: 0.88rem; color: var(--text-muted);">Rata-rata Progres</span>
+          <strong style="font-size: 0.95rem; color: var(--primary);" id="stat-avg-val">-%</strong>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed #e9ecef; padding-bottom: 8px;">
+          <span style="font-size: 0.88rem; color: var(--text-muted);">Median Progres</span>
+          <strong style="font-size: 0.95rem;" id="stat-median-val">-%</strong>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed #e9ecef; padding-bottom: 8px;">
+          <span style="font-size: 0.88rem; color: var(--text-muted);">Progres Tertinggi</span>
+          <strong style="font-size: 0.95rem; color: var(--success);" id="stat-max-val">-%</strong>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 4px;">
+          <span style="font-size: 0.88rem; color: var(--text-muted);">Progres Terendah</span>
+          <strong style="font-size: 0.95rem; color: var(--danger);" id="stat-min-val">-%</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

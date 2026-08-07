@@ -1,0 +1,103 @@
+<!-- Table.html -->
+<div id="view-table" class="page-view">
+  <!-- Table Navigation & Breadcrumbs Row -->
+  <div class="nav-header-row">
+    <div>
+      <h2 style="font-weight: 800; font-size: 1.25rem; color: var(--primary); margin-bottom: 4px;" id="table-sheet-title">Nama Sheet</h2>
+      <div style="font-size: 0.85rem; color: var(--text-muted);">
+        <i class="fas fa-map-marker-alt" style="color: var(--accent); margin-right: 4px;"></i>
+        Wilayah Aktif: <strong id="table-active-region-label" style="color: var(--text-main);">MEMUAT...</strong>
+      </div>
+    </div>
+    
+    <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+      <!-- Breadcrumb Container -->
+      <div id="table-breadcrumb-container"></div>
+      
+      <!-- Back & Home Buttons -->
+      <div class="nav-buttons">
+        <button class="btn" id="btn-table-back" onclick="navigateBack()" title="Kembali ke Wilayah Induk">
+          <i class="fas fa-arrow-left"></i> Back
+        </button>
+        <button class="btn btn-primary" id="btn-table-home" onclick="navigateHome()" title="Kembali ke Wilayah Teratas">
+          <i class="fas fa-home"></i> Home
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Table Card Wrapper -->
+  <div class="table-card">
+    <!-- Toolbar Search & Exports -->
+    <div class="table-toolbar">
+      <!-- Search & Page Size Left -->
+      <div class="toolbar-left">
+        <!-- Global Search Input -->
+        <div class="search-wrapper">
+          <i class="fas fa-search search-icon"></i>
+          <input type="text" id="global-search-input" placeholder="Cari kode atau wilayah..." oninput="onGlobalSearchChange()">
+        </div>
+        
+        <!-- Page Size Select -->
+        <div class="select-group" style="flex-direction: row; align-items: center; gap: 8px;">
+          <span style="font-size: 0.82rem; color: var(--text-muted); font-weight: 600; white-space: nowrap;">Tampilkan</span>
+          <select id="page-size-select" class="form-control" style="padding: 6px 10px; width: 80px;" onchange="onPageSizeChange()">
+            <!-- Generated from Config.gs page sizes -->
+            <option value="10">10</option>
+            <option value="25" selected>25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+          <span style="font-size: 0.82rem; color: var(--text-muted); font-weight: 600; white-space: nowrap;">baris</span>
+        </div>
+      </div>
+      
+      <!-- Export Tool Buttons Right -->
+      <div class="nav-buttons">
+        <button class="btn" onclick="exportToCopy()" title="Salin Tabel ke Clipboard">
+          <i class="fas fa-copy" style="color: var(--primary);"></i> Copy
+        </button>
+        <button class="btn" onclick="exportToCSV()" title="Ekspor ke CSV">
+          <i class="fas fa-file-csv" style="color: #0f8546;"></i> CSV
+        </button>
+        <button class="btn" onclick="exportToExcel()" title="Ekspor ke Excel">
+          <i class="fas fa-file-excel" style="color: #107c41;"></i> Excel
+        </button>
+        <button class="btn" onclick="exportToPrint()" title="Cetak Tabel">
+          <i class="fas fa-print" style="color: #495057;"></i> Print
+        </button>
+      </div>
+    </div>
+
+    <!-- Data Table Container -->
+    <div class="table-scroll-container">
+      <table class="bps-data-table" id="data-table-element">
+        <thead>
+          <!-- Dynamic Header rows will be injected here -->
+        </thead>
+        <tbody id="data-table-body">
+          <!-- Dynamic Data rows will be injected here -->
+          <tr>
+            <td colspan="10" class="empty-state">
+              <i class="fas fa-spinner fa-spin" style="font-size: 1.5rem; margin-bottom: 10px; color: var(--primary);"></i>
+              <div>Memuat data tabel...</div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Table Footer / Pagination -->
+    <div class="table-pagination">
+      <!-- Pagination Info -->
+      <div class="pagination-info" id="table-pagination-info">
+        Menampilkan 0 - 0 dari 0 data
+      </div>
+      
+      <!-- Controls -->
+      <div class="pagination-controls" id="table-pagination-controls">
+        <!-- Buttons injected dynamically -->
+      </div>
+    </div>
+  </div>
+</div>

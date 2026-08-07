@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<!-- Index.html -->
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <title>Dashboard Progres Sensus Ekonomi BPS Kebumen</title>
+    
+    <!-- CSS Style inclusion -->
+    <?!= include('Style'); ?>
+    
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <!-- SheetJS (XLSX) CDN for robust Excel exporting -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  </head>
+  <body>
+    <!-- Full-screen Loading Overlay -->
+    <div id="loading-overlay">
+      <div class="spinner"></div>
+      <div class="loading-text">Menyiapkan Dashboard...</div>
+    </div>
+    
+    <!-- Toast Notification Container -->
+    <div id="toast-container"></div>
+    
+    <!-- Main SPA Layout -->
+    <div id="app-wrapper">
+      
+      <!-- Sidebar Navigation -->
+      <?!= include('Sidebar'); ?>
+      
+      <!-- Main Content Panel -->
+      <div id="main-panel">
+        
+        <!-- Sheet Selector Sub Tabs (Visible on Sheet Table views) -->
+        <div class="sheet-tabs-container" id="sheets-tabs-bar" style="display: none;">
+          <!-- Dynamically injected tabs based on spreadsheet sheets list -->
+        </div>
+        
+        <!-- Views Content Area -->
+        <div id="content-area">
+          <!-- 1. Dashboard View -->
+          <?!= include('Dashboard'); ?>
+          
+          <!-- 2. Dynamic Table View -->
+          <?!= include('Table'); ?>
+          
+          <!-- 3. Compare Regions View -->
+          <?!= include('Compare'); ?>
+          
+          <!-- 4. Data Quality Audit View -->
+          <?!= include('Audit'); ?>
+        </div>
+      </div>
+      
+    </div>
+
+    <!-- Client-side Javascript scripting -->
+    <?!= include('Script'); ?>
+  </body>
+</html>

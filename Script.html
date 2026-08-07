@@ -1,0 +1,2009 @@
+<!-- Script.html -->
+<script>
+  // Global Application State
+  const state = {
+    metadata: {},
+    regions: {},       // Cache for Level 0, 1, 2 (initial payload)
+    loadedSLS: {},     // On-demand cache: { [desaCode]: { [slsCode]: regionData } }
+    loadedDesa: {},    // On-demand cache: { [kecCode]: true } — marks which Kecamatan have Desa data loaded
+    
+    // Navigation State
+    currentTab: 'dashboard',       // 'dashboard', 'table', 'compare', 'audit'
+    currentSheet: '',             // Selected sheet name for table view
+    currentCode: '3305',          // Default active code: Kabupaten Kebumen
+    currentLevel: 1,              // Initial level shown is Kecamatan (Level 1)
+    
+    // Table Controls State
+    globalSearch: '',
+    columnFilters: {},            // { [colIdx]: filterString }
+    sortColumn: -1,
+    sortDirection: 'asc',
+    currentPage: 1,
+    pageSize: 25,
+    
+    // Compare View State
+    compareLevel: 1,              // 1 = Kecamatan, 2 = Desa
+    compareSelected: []           // List of selected codes for comparison
+  };
+
+  // Chart instances to destroy and rebuild on updates
+  let charts = {
+    subregionsProgress: null,
+    skalaUsaha: null,
+    sektorUsaha: null,
+    compareProgress: null,
+    compareSkala: null,
+    compareSektor: null
+  };
+
+  // Run on page load
+  window.addEventListener('DOMContentLoaded', () => {
+    initApp();
+  });
+
+  // Handle browser URL hash changes for deep linking
+  window.addEventListener('hashchange', () => {
+    readHashAndSyncState();
+  });
+
+  // Re-sync sticky header top offsets when window is resized
+  // (debounced to avoid excessive reflows)
+  let _resizeStickyTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(_resizeStickyTimer);
+    _resizeStickyTimer = setTimeout(syncTableStickyOffsets, 150);
+  });
+
+
+  let globalMsgTimer = null;
+  let globalLoadTimeout = null;
+
+  /**
+   * Initializes application, fetches initial payload, restores state from hash
+   */
+  function initApp() {
+    if (globalMsgTimer) { clearInterval(globalMsgTimer); globalMsgTimer = null; }
+    if (globalLoadTimeout) { clearTimeout(globalLoadTimeout); globalLoadTimeout = null; }
+    
+    showLoading(true, "Menghubungkan ke data BPS...");
+
+    var loadMessages = [
+      "Membaca struktur data spreadsheet...",
+      "Menyusun wilayah administrasi...",
+      "Menghitung indikator per wilayah...",
+      "Menyiapkan dashboard...",
+      "Membangun cache awal (pertama kali bisa 30-60 detik)...",
+      "Masih memuat, harap tunggu..."
+    ];
+    var msgIdx = 0;
+    globalMsgTimer = setInterval(function() {
+      const overlay = document.getElementById('loading-overlay');
+      if (overlay && overlay.style.display !== 'none') {
+        if (msgIdx < loadMessages.length) {
+          const txt = overlay.querySelector('.loading-text');
+          if (txt) txt.innerText = loadMessages[msgIdx++];
+        }
+      } else {
+        if (globalMsgTimer) { clearInterval(globalMsgTimer); globalMsgTimer = null; }
+      }
+    }, 5000);
+
+    // Safety net: jika server tidak merespons dalam 90 detik, tampilkan pesan timeout
+    globalLoadTimeout = setTimeout(function() {
+      if (globalMsgTimer) { clearInterval(globalMsgTimer); globalMsgTimer = null; }
+      showLoading(false);
+      showErrorBanner(
+        "Server tidak merespons setelah 90 detik.<br><br>" +
+        "<strong>Kemungkinan penyebab:</strong><br>" +
+        "1. Script belum di-deploy ulang setelah perubahan kode. Buka Apps Script → klik <b>Deploy → Manage deployments → Update</b> lalu buka URL baru.<br>" +
+        "2. Script tidak terhubung ke Spreadsheet (Standalone). Isi <code>SPREADSHEET_ID</code> di <code>Config.gs</code>.<br>" +
+        "3. Spreadsheet memiliki terlalu banyak baris/kolom sehingga melebihi batas 30 detik Google Apps Script.<br>" +
+        "4. Akun Google tidak memiliki akses ke Spreadsheet."
+      );
+    }, 90000);
+
+    google.script.run
+      .withSuccessHandler((responseJson) => {
+        if (globalLoadTimeout) { clearTimeout(globalLoadTimeout); globalLoadTimeout = null; }
+        showLoading(false);
+        try {
+          const response = typeof responseJson === 'string' ? JSON.parse(responseJson) : responseJson;
+          if (response.status === "success" && response.data) {
+            state.metadata = response.data.metadata || {};
+            state.regions = response.data.regions || {};
+
+            const sheetNames = Object.keys(state.metadata.sheets || {});
+            if (sheetNames.length > 0) {
+              state.currentSheet = sheetNames[0];
+            }
+
+            buildSheetsNavigation(sheetNames);
+            populateCompareDropdownOptions();
+            renderAuditReport(response.data.audit);
+
+            const lastUpdated = state.metadata.lastUpdated
+              ? new Date(state.metadata.lastUpdated).toLocaleString('id-ID')
+              : '-';
+            const statusBadge = document.getElementById('cache-status-text');
+            if (statusBadge) statusBadge.innerText = 'Cache: ' + lastUpdated;
+
+            // Render UI immediately with complete dataset from Master JSON Cache
+            readHashAndSyncState();
+            showToast("success", "Aplikasi siap! Data dimuat dari Master Cache.");
+
+          } else {
+            showErrorBanner(response.message || "Gagal memuat data awal dari Spreadsheet.");
+          }
+        } catch (err) {
+          showErrorBanner("Format data dari server tidak valid: " + err.message);
+        }
+
+      })
+      .withFailureHandler((err) => {
+        if (globalLoadTimeout) { clearTimeout(globalLoadTimeout); globalLoadTimeout = null; }
+        showLoading(false);
+        const errMsg = err ? (err.message || String(err)) : "Koneksi ke Google Apps Script terputus.";
+        showErrorBanner(
+          "Koneksi Server Gagal: " + errMsg +
+          "<br><br><strong>Solusi:</strong> Pastikan script sudah di-deploy sebagai Web App dan akun Anda memiliki akses Spreadsheet."
+        );
+      })
+      .getInitialPayloadServer();
+  }
+
+
+  function buildSheetsNavigation(sheetNames) {
+    const container = document.getElementById('dynamic-sheets-nav-container');
+    const tabsBar = document.getElementById('sheets-tabs-bar');
+    
+    let sidebarHtml = '';
+    let tabsHtml = '';
+    
+    sheetNames.forEach(name => {
+      sidebarHtml += `
+        <li>
+          <a class="menu-item sheet-nav-link" id="sheet-nav-${cleanId(name)}" onclick="selectSheet('${escapeJsString(name)}')">
+            <i class="fas fa-table"></i>
+            <span>${name}</span>
+          </a>
+        </li>
+      `;
+      
+      tabsHtml += `
+        <div class="sheet-tab" id="sheet-tab-${cleanId(name)}" onclick="selectSheet('${escapeJsString(name)}')">
+          <i class="fas fa-file-invoice"></i>
+          <span>${name}</span>
+        </div>
+      `;
+    });
+    
+    container.innerHTML = sidebarHtml;
+    tabsBar.innerHTML = tabsHtml;
+  }
+
+  /**
+   * Toggle visual sidebar collapse/expand
+   */
+  function toggleSidebar() {
+    document.body.classList.toggle('sidebar-collapsed');
+    const trigger = document.getElementById('toggle-sidebar-trigger').querySelector('i');
+    if (document.body.classList.contains('sidebar-collapsed')) {
+      trigger.className = 'fas fa-chevron-right';
+    } else {
+      trigger.className = 'fas fa-bars';
+    }
+  }
+
+  /**
+   * Switches the active Single Page Application (SPA) view tab
+   */
+  function switchView(tabId) {
+    state.currentTab = tabId;
+    
+    // Manage Sidebar Menu active class
+    document.querySelectorAll('.sidebar-menu a').forEach(a => a.classList.remove('active'));
+    document.querySelectorAll('.sheet-tab').forEach(t => t.classList.remove('active'));
+    
+    if (tabId === 'dashboard') {
+      document.getElementById('nav-dashboard').classList.add('active');
+      document.getElementById('sheets-tabs-bar').style.display = 'none';
+    } else if (tabId === 'compare') {
+      document.getElementById('nav-compare').classList.add('active');
+      document.getElementById('sheets-tabs-bar').style.display = 'none';
+    } else if (tabId === 'audit') {
+      document.getElementById('nav-audit').classList.add('active');
+      document.getElementById('sheets-tabs-bar').style.display = 'none';
+    } else if (tabId === 'table') {
+      document.getElementById('sheets-tabs-bar').style.display = 'flex';
+      // Activate correct sidebar sheet and top tab
+      const sideLink = document.getElementById(`sheet-nav-${cleanId(state.currentSheet)}`);
+      const topTab = document.getElementById(`sheet-tab-${cleanId(state.currentSheet)}`);
+      if (sideLink) sideLink.classList.add('active');
+      if (topTab) topTab.classList.add('active');
+    }
+    
+    // Switch views display
+    document.querySelectorAll('.page-view').forEach(view => view.classList.remove('active'));
+    if (tabId === 'table') {
+      document.getElementById('view-table').classList.add('active');
+    } else {
+      document.getElementById(`view-${tabId}`).classList.add('active');
+    }
+    
+    // Update hash for deep linking
+    updateHashURL();
+    
+    // Trigger rendering logic for the selected tab
+    triggerTabRendering();
+  }
+
+  /**
+   * Action when a specific sheet tab is selected
+   */
+  function selectSheet(sheetName) {
+    state.currentSheet = sheetName;
+    
+    // Reset filters and table page
+    state.globalSearch = '';
+    state.columnFilters = {};
+    state.currentPage = 1;
+    state.sortColumn = -1;
+    
+    // Reset inputs in UI
+    const searchInp = document.getElementById('global-search-input');
+    if (searchInp) searchInp.value = '';
+    
+    switchView('table');
+  }
+
+  /**
+   * Triggers rendering based on the active tab state
+   */
+  function triggerTabRendering() {
+    if (state.currentTab === 'dashboard') {
+      renderDashboard();
+    } else if (state.currentTab === 'table') {
+      renderTable();
+    } else if (state.currentTab === 'compare') {
+      renderCompareView();
+    } else if (state.currentTab === 'audit') {
+      // Audit view doesn't change by navigation code, it is static per load
+    }
+  }
+
+  /**
+   * Dynamic Region Navigation (Drill Down / Drill Up)
+   */
+  function navigateToRegion(code) {
+    const targetLevel = getBpsLevel(code);
+    if (targetLevel === -1) return;
+    
+    state.currentCode = code;
+    state.currentLevel = targetLevel;
+    
+    if (targetLevel >= 3) {
+      // SLS / Sub-SLS: ensure SLS data for parent Desa is loaded
+      const desaCode = code.substring(0, 10);
+      ensureSLSDataLoaded(desaCode, () => {
+        updateHashURL();
+        triggerTabRendering();
+      });
+    } else if (targetLevel === 1) {
+      // Navigating INTO a Kecamatan: lazy-load Desa cell data for this Kecamatan
+      ensureDesaDataLoaded(code, () => {
+        updateHashURL();
+        triggerTabRendering();
+      });
+    } else if (targetLevel === 2) {
+      // Navigating INTO a Desa: load Desa cell data AND load SLS/Sub-SLS child nodes under this Desa
+      const kecCode = code.substring(0, 7);
+      ensureDesaDataLoaded(kecCode, () => {
+        ensureSLSDataLoaded(code, () => {
+          updateHashURL();
+          triggerTabRendering();
+        });
+      });
+    } else {
+      updateHashURL();
+      triggerTabRendering();
+    }
+  }
+
+  /**
+   * Navigates back one level in the administrative hierarchy
+   */
+  function navigateBack() {
+    if (state.currentLevel === 0) return; // Cannot go back further than Kabupaten
+    
+    const parentCode = getParentCode(state.currentCode);
+    if (parentCode) {
+      navigateToRegion(parentCode);
+    }
+  }
+
+  /**
+   * Navigates directly to the top level (Kabupaten)
+   */
+  function navigateHome() {
+    navigateToRegion('3305');
+  }
+
+  /**
+   * Checks if SLS/Sub-SLS data is loaded for the Desa, and calls callback.
+   * If not loaded, fetches it dynamically from server.
+   */
+  function ensureSLSDataLoaded(desaCode, callback) {
+    if (state.loadedSLS[desaCode]) {
+      callback();
+      return;
+    }
+    
+    showLoading(true, "Memuat Data SLS...");
+    
+    google.script.run
+      .withSuccessHandler((responseJson) => {
+        const response = JSON.parse(responseJson);
+        if (response.status === "success") {
+          state.loadedSLS[desaCode] = response.data;
+          
+          // Merge loaded SLS regions into active global state.regions cache
+          Object.assign(state.regions, response.data);
+          
+          showLoading(false);
+          callback();
+        } else {
+          showToast("danger", "Gagal: " + response.message);
+          showLoading(false);
+        }
+      })
+      .withFailureHandler((err) => {
+        showToast("danger", "Gagal memuat SLS: " + err.message);
+        showLoading(false);
+      })
+      .getSLSDataServer(desaCode);
+  }
+
+  /**
+   * Checks if Desa cell data is loaded for a Kecamatan, and calls callback.
+   * If not loaded, fetches all Desa data for that Kecamatan lazily from server.
+   */
+  function ensureDesaDataLoaded(kecCode, callback) {
+    if (state.loadedDesa[kecCode]) {
+      callback();
+      return;
+    }
+    
+    showLoading(true, "Memuat data desa...");
+    
+    google.script.run
+      .withSuccessHandler((responseJson) => {
+        const response = JSON.parse(responseJson);
+        if (response.status === "success") {
+          state.loadedDesa[kecCode] = true; // Mark as loaded
+          
+          // Merge Desa cell values into state.regions
+          // state.regions already has Desa entries (name/level/parent) from initial payload
+          // We only update the .sheets property with actual cell data
+          for (const code in response.data) {
+            if (state.regions[code]) {
+              state.regions[code].sheets = response.data[code].sheets;
+            } else {
+              state.regions[code] = response.data[code];
+            }
+          }
+          
+          showLoading(false);
+          callback();
+        } else {
+          showToast("danger", "Gagal memuat data desa: " + response.message);
+          showLoading(false);
+          callback(); // still render, just without cell values
+        }
+      })
+      .withFailureHandler((err) => {
+        showToast("danger", "Gagal memuat desa: " + err.message);
+        showLoading(false);
+        callback(); // still render
+      })
+      .getDesaDataServer(kecCode);
+  }
+
+  /**
+   * Resolves parent code of a BPS region code
+   */
+  function getParentCode(code) {
+    const len = code.length;
+    if (len === 16) return code.substring(0, 14); // Sub-SLS to SLS
+    if (len === 14) return code.substring(0, 10); // SLS to Desa
+    if (len === 10) return code.substring(0, 7);  // Desa to Kecamatan
+    if (len === 7) return code.substring(0, 4);   // Kecamatan to Kabupaten
+    return '';
+  }
+
+  /**
+   * Returns BPS level index from code string length
+   */
+  function getBpsLevel(code) {
+    const len = String(code).length;
+    if (len === 4) return 0;
+    if (len === 7) return 1;
+    if (len === 10) return 2;
+    if (len === 14) return 3;
+    if (len === 16) return 4;
+    return -1;
+  }
+
+  function getBpsLevelName(level) {
+    const names = ["Kabupaten", "Kecamatan", "Desa/Kelurahan", "SLS", "Sub-SLS"];
+    return names[level] || "Tidak Diketahui";
+  }
+
+  /**
+   * Deep Linking: Updates the URL Hash based on active state parameters
+   */
+  function updateHashURL() {
+    const params = new URLSearchParams();
+    params.set('tab', state.currentTab);
+    if (state.currentTab === 'table') {
+      params.set('sheet', state.currentSheet);
+    }
+    params.set('code', state.currentCode);
+    window.location.hash = params.toString();
+  }
+
+  /**
+   * Deep Linking: Parses the URL Hash and aligns state parameters accordingly
+   */
+  function readHashAndSyncState() {
+    const hash = window.location.hash.substring(1);
+    if (!hash) {
+      // Default initial state: Dashboard and Kecamatan Level 1
+      switchView('dashboard');
+      navigateToRegion('3305');
+      return;
+    }
+    
+    const params = new URLSearchParams(hash);
+    const tab = params.get('tab') || 'dashboard';
+    const sheet = params.get('sheet');
+    const code = params.get('code') || '3305';
+    
+    if (sheet && Object.keys(state.metadata.sheets).includes(sheet)) {
+      state.currentSheet = sheet;
+    }
+    
+    const targetLevel = getBpsLevel(code);
+    state.currentCode = code;
+    state.currentLevel = targetLevel !== -1 ? targetLevel : 0;
+    
+    // Ensure SLS loaded if opening SLS deep-linked level directly
+    if (state.currentLevel >= 3) {
+      const desaCode = code.substring(0, 10);
+      ensureSLSDataLoaded(desaCode, () => {
+        switchView(tab);
+      });
+    } else {
+      switchView(tab);
+    }
+  }
+
+  /*************************************************************
+   * DASHBOARD VIEW RENDERING LOGIC
+   *************************************************************/
+  function renderDashboard() {
+    const activeCode = state.currentCode;
+    const regData = state.regions[activeCode];
+    
+    if (!regData) {
+      document.getElementById('db-active-region-label').innerText = "TIDAK DIKETAHUI";
+      return;
+    }
+    
+    document.getElementById('db-active-region-label').innerText = `${regData.levelName.toUpperCase()}: ${regData.name}`;
+    
+    // Render Dashboard Breadcrumbs
+    renderBreadcrumbs('dashboard-breadcrumb-container');
+    
+    // 1. Calculate Active Region KPI Metrics from PROGRES PENDATAAN sheet
+    const progSheetName = "PROGRES PENDATAAN";
+    const progMeta = state.metadata.sheets[progSheetName];
+    let prelist = 0;
+    let didata = 0;
+    let draft = 0;
+    let progressPercent = 0;
+    
+    if (progMeta && regData.sheets[progSheetName]) {
+      const cellVals = regData.sheets[progSheetName];
+      const keyCols = progMeta.keyColumns;
+      
+      prelist = safeGetCellNumber(cellVals, keyCols.prelist);
+      didata = safeGetCellNumber(cellVals, keyCols.didata);
+      draft = safeGetCellNumber(cellVals, keyCols.draft);
+      
+      progressPercent = prelist > 0 ? (didata / prelist) * 100 : 0;
+    }
+    
+    document.getElementById('kpi-prelist-val').innerText = formatIndonesianNumber(prelist);
+    document.getElementById('kpi-didata-val').innerText = formatIndonesianNumber(didata);
+    document.getElementById('kpi-draft-val').innerText = formatIndonesianNumber(draft);
+    document.getElementById('kpi-progress-val').innerText = progressPercent.toFixed(2) + "%";
+    document.getElementById('kpi-progress-bar').style.width = Math.min(progressPercent, 100) + "%";
+    
+    // 2. Fetch all child regions under active region for breakdown analysis
+    const childRegions = getChildRegions(activeCode);
+    document.getElementById('child-level-label').innerText = `Level ${getBpsLevelName(state.currentLevel + 1)}`;
+    
+    // 3. Render Bar Chart: Progress Breakdown of Child Regions
+    renderSubRegionsProgressChart(childRegions);
+    
+    // 4. Render Skala Usaha Chart (UB, UM, UMK)
+    renderSkalaUsahaChart(regData);
+    
+    // 5. Render Sektor Usaha Chart (Pertanian vs Non-Pertanian)
+    renderSektorUsahaChart(regData);
+    
+    // 6. Calculate Top 10 and Bottom 10 analytical rankings
+    renderTopBottomRankings(childRegions);
+  }
+
+  /**
+   * Helper to retrieve immediate children of a region code
+   */
+  function getChildRegions(parentCode) {
+    const parentLevel = getBpsLevel(parentCode);
+    const childLevel = parentLevel + 1;
+    const children = [];
+    
+    for (const code in state.regions) {
+      const reg = state.regions[code];
+      if (reg.level === childLevel && reg.parent === parentCode) {
+        children.push({
+          code: code,
+          name: reg.name,
+          data: reg
+        });
+      }
+    }
+    
+    return children;
+  }
+
+  /**
+   * Generates breadcrumb links dynamically
+   */
+  function renderBreadcrumbs(containerId) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    
+    const crumbs = [];
+    let codeTemp = state.currentCode;
+    
+    while (codeTemp) {
+      const reg = state.regions[codeTemp];
+      if (reg) {
+        crumbs.unshift({
+          code: codeTemp,
+          name: reg.name
+        });
+        codeTemp = reg.parent;
+      } else {
+        break;
+      }
+    }
+    
+    // Add default Home if Kebumen itself is not loaded or for robustness
+    if (crumbs.length === 0 || crumbs[0].code !== '3305') {
+      const kebumenReg = state.regions['3305'];
+      if (kebumenReg) {
+        crumbs.unshift({ code: '3305', name: kebumenReg.name });
+      }
+    }
+    
+    let html = '<ul class="breadcrumb">';
+    crumbs.forEach((c, idx) => {
+      if (idx === crumbs.length - 1) {
+        html += `<li class="breadcrumb-item active">${c.name}</li>`;
+      } else {
+        html += `<li class="breadcrumb-item"><a onclick="navigateToRegion('${c.code}')">${c.name}</a></li>`;
+      }
+    });
+    html += '</ul>';
+    
+    container.innerHTML = html;
+  }
+
+  /**
+   * Render Bar Chart of Child Region completion rates
+   */
+  function renderSubRegionsProgressChart(childRegions) {
+    const ctx = document.getElementById('chart-subregions-progress').getContext('2d');
+    
+    // Destroy previous instance
+    if (charts.subregionsProgress) {
+      charts.subregionsProgress.destroy();
+    }
+    
+    if (childRegions.length === 0) {
+      ctx.clearRect(0, 0, 400, 300);
+      return;
+    }
+    
+    // Gather names and calculate progress percentage for each child
+    const progMeta = state.metadata.sheets["PROGRES PENDATAAN"];
+    const labels = [];
+    const percentages = [];
+    
+    childRegions.forEach(child => {
+      labels.push(child.name);
+      
+      let pct = 0;
+      if (progMeta && child.data.sheets["PROGRES PENDATAAN"]) {
+        const vals = child.data.sheets["PROGRES PENDATAAN"];
+        const prelist = safeGetCellNumber(vals, progMeta.keyColumns.prelist);
+        const didata = safeGetCellNumber(vals, progMeta.keyColumns.didata);
+        pct = prelist > 0 ? (didata / prelist) * 100 : 0;
+      }
+      percentages.push(pct);
+    });
+    
+    charts.subregionsProgress = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Progres Selesai (%)',
+          data: percentages,
+          backgroundColor: 'rgba(247, 140, 0, 0.85)',
+          borderColor: 'rgba(212, 107, 0, 1)',
+          borderWidth: 1,
+          borderRadius: 5
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          y: {
+            beginAtZero: true,
+            max: 100,
+            grid: { color: 'rgba(0, 0, 0, 0.05)' }
+          },
+          x: {
+            grid: { display: false }
+          }
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                return `Progres: ${context.raw.toFixed(2)}%`;
+              }
+            }
+          }
+        }
+      }
+    });
+  }
+
+  /**
+   * Render Pie Chart for Skala Usaha (UB vs UM vs UMK) prelist counts
+   */
+  function renderSkalaUsahaChart(regData) {
+    const ctx = document.getElementById('chart-skala-usaha').getContext('2d');
+    const legendDiv = document.getElementById('chart-skala-usaha-legend-fallback');
+    
+    if (charts.skalaUsaha) {
+      charts.skalaUsaha.destroy();
+    }
+    
+    const meta = state.metadata.sheets["SKALA USAHA"];
+    const vals = regData.sheets["SKALA USAHA"];
+    
+    let ub = 0, um = 0, umk = 0;
+    if (meta && vals) {
+      ub = safeGetCellNumber(vals, meta.keyColumns.prelist_ub);
+      um = safeGetCellNumber(vals, meta.keyColumns.prelist_um);
+      umk = safeGetCellNumber(vals, meta.keyColumns.prelist_umk);
+    }
+    
+    const total = ub + um + umk;
+    
+    // Update legend UI text
+    legendDiv.innerHTML = `
+      <div style="display:flex; justify-content:space-between;">
+        <span><i class="fas fa-circle" style="color:#f78c00; margin-right:6px;"></i>Usaha Besar (UB)</span>
+        <strong>${formatIndonesianNumber(ub)} (${total > 0 ? ((ub/total)*100).toFixed(1) : 0}%)</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between;">
+        <span><i class="fas fa-circle" style="color:#ffb830; margin-right:6px;"></i>Usaha Menengah (UM)</span>
+        <strong>${formatIndonesianNumber(um)} (${total > 0 ? ((um/total)*100).toFixed(1) : 0}%)</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between;">
+        <span><i class="fas fa-circle" style="color:#0a3c91; margin-right:6px;"></i>Usaha Mikro Kecil (UMK)</span>
+        <strong>${formatIndonesianNumber(umk)} (${total > 0 ? ((umk/total)*100).toFixed(1) : 0}%)</strong>
+      </div>
+    `;
+    
+    charts.skalaUsaha = new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels: ['Usaha Besar (UB)', 'Usaha Menengah (UM)', 'Usaha Mikro Kecil (UMK)'],
+        datasets: [{
+          data: [ub, um, umk],
+          backgroundColor: ['#f78c00', '#ffb830', '#0a3c91'],
+          borderWidth: 3,
+          borderColor: '#ffffff'
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false }
+        }
+      }
+    });
+  }
+
+  /**
+   * Render Sektor Usaha (Pertanian vs Non-Pertanian) Pie Chart
+   */
+  function renderSektorUsahaChart(regData) {
+    const ctx = document.getElementById('chart-sektor-usaha').getContext('2d');
+    const legendDiv = document.getElementById('chart-sektor-legend-fallback');
+    
+    if (charts.sektorUsaha) {
+      charts.sektorUsaha.destroy();
+    }
+    
+    const meta = state.metadata.sheets["PROPORSI PERTANIAN NON PERTANIA"];
+    const vals = regData.sheets["PROPORSI PERTANIAN NON PERTANIA"];
+    
+    let tani = 0, nontani = 0;
+    if (meta && vals) {
+      const bku_tani_dit = safeGetCellNumber(vals, meta.keyColumns.bku_ditemukan_tani);
+      const bku_tani_baru = safeGetCellNumber(vals, meta.keyColumns.bku_baru_tani);
+      const kel_tani_dit = safeGetCellNumber(vals, meta.keyColumns.kel_ditemukan_tani);
+      const kel_tani_baru = safeGetCellNumber(vals, meta.keyColumns.kel_baru_tani);
+      
+      tani = bku_tani_dit + bku_tani_baru + kel_tani_dit + kel_tani_baru;
+      
+      const bku_nontani_dit = safeGetCellNumber(vals, meta.keyColumns.bku_ditemukan_nontani);
+      const bku_nontani_baru = safeGetCellNumber(vals, meta.keyColumns.bku_baru_nontani);
+      const kel_nontani_dit = safeGetCellNumber(vals, meta.keyColumns.kel_ditemukan_nontani);
+      const kel_nontani_baru = safeGetCellNumber(vals, meta.keyColumns.kel_baru_nontani);
+      
+      nontani = bku_nontani_dit + bku_nontani_baru + kel_nontani_dit + kel_nontani_baru;
+    }
+    
+    const total = tani + nontani;
+    
+    legendDiv.innerHTML = `
+      <div style="display:flex; justify-content:space-between;">
+        <span><i class="fas fa-circle" style="color:#2e7d32; margin-right:6px;"></i>Sektor Pertanian</span>
+        <strong>${formatIndonesianNumber(tani)} (${total > 0 ? ((tani/total)*100).toFixed(1) : 0}%)</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between;">
+        <span><i class="fas fa-circle" style="color:#f78c00; margin-right:6px;"></i>Sektor Non Pertanian</span>
+        <strong>${formatIndonesianNumber(nontani)} (${total > 0 ? ((nontani/total)*100).toFixed(1) : 0}%)</strong>
+      </div>
+    `;
+    
+    charts.sektorUsaha = new Chart(ctx, {
+      type: 'pie',
+      data: {
+        labels: ['Sektor Pertanian', 'Sektor Non Pertanian'],
+        datasets: [{
+          data: [tani, nontani],
+          backgroundColor: ['#2e7d32', '#f78c00'],
+          borderWidth: 3,
+          borderColor: '#ffffff'
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false }
+        }
+      }
+    });
+  }
+
+  /**
+   * Computes top performing and bottom performing sub-regions
+   */
+  function renderTopBottomRankings(childRegions) {
+    const topList = document.getElementById('analytics-top-list');
+    const bottomList = document.getElementById('analytics-bottom-list');
+    
+    if (childRegions.length === 0) {
+      topList.innerHTML = `<div class="empty-state">Tidak ada sub-wilayah</div>`;
+      bottomList.innerHTML = `<div class="empty-state">Tidak ada sub-wilayah</div>`;
+      // Reset statistics deskriptif
+      document.getElementById('stat-count-val').innerText = '0';
+      document.getElementById('stat-avg-val').innerText = '0%';
+      document.getElementById('stat-median-val').innerText = '0%';
+      document.getElementById('stat-max-val').innerText = '0%';
+      document.getElementById('stat-min-val').innerText = '0%';
+      return;
+    }
+    
+    const progMeta = state.metadata.sheets["PROGRES PENDATAAN"];
+    
+    // Map with percentages
+    const analyzed = childRegions.map(child => {
+      let pct = 0;
+      if (progMeta && child.data.sheets["PROGRES PENDATAAN"]) {
+        const vals = child.data.sheets["PROGRES PENDATAAN"];
+        const prelist = safeGetCellNumber(vals, progMeta.keyColumns.prelist);
+        const didata = safeGetCellNumber(vals, progMeta.keyColumns.didata);
+        pct = prelist > 0 ? (didata / prelist) * 100 : 0;
+      }
+      return {
+        code: child.code,
+        name: child.name,
+        progress: pct
+      };
+    });
+    
+    // Sort ascending & descending
+    const sortedDesc = [...analyzed].sort((a,b) => b.progress - a.progress);
+    const sortedAsc = [...analyzed].sort((a,b) => a.progress - b.progress);
+    
+    // Build lists
+    let topHtml = '';
+    sortedDesc.slice(0, 10).forEach((item, index) => {
+      topHtml += `
+        <div class="analytics-item">
+          <div class="analytics-region-info">
+            <span class="analytics-rank top-${index + 1}">${index + 1}</span>
+            <span class="analytics-region-name"><a onclick="navigateToRegion('${item.code}')" style="cursor:pointer; color:var(--primary);">${item.name}</a></span>
+          </div>
+          <span class="analytics-region-progress">${item.progress.toFixed(2)}%</span>
+        </div>
+      `;
+    });
+    topList.innerHTML = topHtml;
+    
+    let bottomHtml = '';
+    sortedAsc.slice(0, 10).forEach((item, index) => {
+      bottomHtml += `
+        <div class="analytics-item">
+          <div class="analytics-region-info">
+            <span class="analytics-rank">${index + 1}</span>
+            <span class="analytics-region-name"><a onclick="navigateToRegion('${item.code}')" style="cursor:pointer; color:var(--primary);">${item.name}</a></span>
+          </div>
+          <span class="analytics-region-progress low">${item.progress.toFixed(2)}%</span>
+        </div>
+      `;
+    });
+    bottomList.innerHTML = bottomHtml;
+    
+    // Calculate Descriptive Statistics
+    const count = analyzed.length;
+    const sum = analyzed.reduce((acc, curr) => acc + curr.progress, 0);
+    const avg = sum / count;
+    
+    // Median calculation
+    const sortedProgress = analyzed.map(x => x.progress).sort((a, b) => a - b);
+    let median = 0;
+    if (count % 2 === 0) {
+      median = (sortedProgress[count / 2 - 1] + sortedProgress[count / 2]) / 2;
+    } else {
+      median = sortedProgress[Math.floor(count / 2)];
+    }
+    
+    const maxVal = sortedProgress[count - 1];
+    const minVal = sortedProgress[0];
+    
+    document.getElementById('stat-count-val').innerText = count;
+    document.getElementById('stat-avg-val').innerText = avg.toFixed(2) + "%";
+    document.getElementById('stat-median-val').innerText = median.toFixed(2) + "%";
+    document.getElementById('stat-max-val').innerText = maxVal.toFixed(2) + "%";
+    document.getElementById('stat-min-val').innerText = minVal.toFixed(2) + "%";
+  }
+
+  /*************************************************************
+   * DYNAMIC TABLE VIEW RENDERING LOGIC (NO HARDCODE)
+   *************************************************************/
+  function renderTable() {
+    const sheetName = state.currentSheet;
+    const sheetMeta = state.metadata.sheets[sheetName];
+    
+    if (!sheetMeta) return;
+    
+    document.getElementById('table-sheet-title').innerText = sheetName;
+    
+    const activeCode = state.currentCode;
+    const regData = state.regions[activeCode];
+    document.getElementById('table-active-region-label').innerText = regData ? `${regData.levelName.toUpperCase()}: ${regData.name}` : 'TIDAK DIKETAHUI';
+    
+    // Render breadcrumbs
+    renderBreadcrumbs('table-breadcrumb-container');
+    
+    const thead = document.querySelector('#data-table-element thead');
+
+    // =========================================================
+    // Build header rows — class-based sticky cols (col-sticky-0/1)
+    // =========================================================
+    let headersHtml = '';
+
+    // For each header row, track what "real column index" we're on
+    // so we can correctly tag only col 0 and col 1 cells
+    sheetMeta.headers.forEach((headerRow, rowIdx) => {
+      const isNumberingRow = String(headerRow[0]).trim() === '(1)';
+      headersHtml += '<tr>';
+
+      let realColIdx = 0; // tracks actual table column position accounting for colspans
+
+      headerRow.forEach((cellLabel, srcIdx) => {
+        const cellSpan = calculateColAndRowSpan(sheetMeta.headers, rowIdx, srcIdx);
+        if (cellSpan.hidden) return;
+
+        let cls = '';
+        if (realColIdx === 0 && cellSpan.colspan === 1) cls = 'col-sticky-0';
+        else if (realColIdx === 1 && cellSpan.colspan === 1) cls = 'col-sticky-1';
+
+        let attr = cls ? ` class="${cls}"` : '';
+        if (cellSpan.colspan > 1) attr += ` colspan="${cellSpan.colspan}"`;
+        if (cellSpan.rowspan > 1) attr += ` rowspan="${cellSpan.rowspan}"`;
+
+        // Sorting on last/numbering row, single-column only, from col 2 onward
+        if (realColIdx >= 2 && cellSpan.colspan === 1 &&
+            (rowIdx === sheetMeta.headers.length - 1 || isNumberingRow)) {
+          let sortClass = 'sort-header' + (cls ? ' ' + cls : '');
+          if (state.sortColumn === srcIdx) sortClass += ' ' + state.sortDirection;
+          headersHtml += `<th class="${sortClass}" onclick="onTableSort(${srcIdx})"${cellSpan.colspan > 1 ? ` colspan="${cellSpan.colspan}"` : ''}${cellSpan.rowspan > 1 ? ` rowspan="${cellSpan.rowspan}"` : ''}>${cellLabel}</th>`;
+        } else {
+          headersHtml += `<th${attr}>${cellLabel}</th>`;
+        }
+
+        realColIdx += cellSpan.colspan;
+      });
+
+      headersHtml += '</tr>';
+    });
+
+    // Filter row — always exactly sheetMeta.columnsCount cells
+    headersHtml += '<tr class="column-filter-row">';
+    for (let ci = 0; ci < sheetMeta.columnsCount; ci++) {
+      const stickyClass = ci === 0 ? ' class="col-sticky-0"'
+                        : ci === 1 ? ' class="col-sticky-1"' : '';
+      headersHtml += `<td${stickyClass}><input type="text" class="column-filter-input" placeholder="Filter..." value="${state.columnFilters[ci] || ''}" oninput="onColumnFilterChange(${ci}, this.value)"></td>`;
+    }
+    headersHtml += '</tr>';
+
+    thead.innerHTML = headersHtml;
+
+    // After injecting headers, compute exact top offsets dynamically
+    syncTableStickyOffsets();
+
+    // =========================================================
+    // Build body rows
+    // =========================================================
+    const childRegions = getChildRegions(state.currentCode);
+    let tableRowsData = childRegions.map(child => {
+      const sheetVals = child.data.sheets[sheetName] || [];
+      return [child.code, child.name, ...sheetVals];
+    });
+
+    tableRowsData = applyFilters(tableRowsData);
+
+    if (state.sortColumn !== -1) {
+      const colIdx = state.sortColumn;
+      const dir = state.sortDirection === 'asc' ? 1 : -1;
+      tableRowsData.sort((a, b) => {
+        let valA = a[colIdx];
+        let valB = b[colIdx];
+        if (colIdx >= 2) {
+          valA = safeParseNumber(valA);
+          valB = safeParseNumber(valB);
+        } else {
+          valA = String(valA).toLowerCase();
+          valB = String(valB).toLowerCase();
+        }
+        if (valA < valB) return -1 * dir;
+        if (valA > valB) return 1 * dir;
+        return 0;
+      });
+    }
+
+    const totalRecords = tableRowsData.length;
+    const maxPages = Math.ceil(totalRecords / state.pageSize) || 1;
+    if (state.currentPage > maxPages) state.currentPage = maxPages;
+
+    const startIdx = (state.currentPage - 1) * state.pageSize;
+    const endIdx = Math.min(startIdx + state.pageSize, totalRecords);
+    const slicedData = tableRowsData.slice(startIdx, endIdx);
+
+    const tbody = document.getElementById('data-table-body');
+    if (slicedData.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="${sheetMeta.columnsCount}" class="empty-state"><i class="fas fa-search-minus" style="font-size:2rem; margin-bottom:8px;"></i>No results found.</td></tr>`;
+      document.getElementById('table-pagination-info').innerText = 'Menampilkan 0 - 0 dari 0 data';
+      renderPaginationControls(0, 1);
+      return;
+    }
+
+    let bodyHtml = '';
+    slicedData.forEach(row => {
+      const code = String(row[0] || '');
+      const name = row[1];
+      const rowLevel = getBpsLevel(code);
+      const isDrillable = rowLevel < 4;
+      const trAttr = isDrillable ? `ondblclick="navigateToRegion('${code}')" title="Double click untuk drill down"` : '';
+
+      bodyHtml += `<tr ${trAttr}>`;
+      bodyHtml += `<td class="col-sticky-0">${code}</td>`;
+      bodyHtml += `<td class="col-sticky-1">${name}</td>`;
+
+      for (let cIdx = 2; cIdx < row.length; cIdx++) {
+        let val = row[cIdx];
+        let cellClass = '';
+        if (typeof val === 'number') {
+          cellClass = 'text-right';
+          const headerPath = sheetMeta.headerPaths[cIdx] || '';
+          if (headerPath.toLowerCase().indexOf('persen') !== -1 || headerPath.indexOf('%') !== -1) {
+            val = val.toFixed(2) + '%';
+          } else {
+            val = formatIndonesianNumber(val);
+          }
+        }
+        bodyHtml += `<td class="${cellClass}">${val}</td>`;
+      }
+      bodyHtml += '</tr>';
+    });
+
+    tbody.innerHTML = bodyHtml;
+    document.getElementById('table-pagination-info').innerText = `Menampilkan ${totalRecords > 0 ? startIdx + 1 : 0} - ${endIdx} dari ${totalRecords} data`;
+    renderPaginationControls(totalRecords, maxPages);
+  }
+
+  /**
+   * Computes exact pixel `top` for every sticky header row after DOM insertion.
+   * This replaces hardcoded top: 38px / 76px in CSS, making it responsive
+   * to any number of header rows and any row heights (including wrapped text).
+   */
+  function syncTableStickyOffsets() {
+    const thead = document.querySelector('#data-table-element thead');
+    if (!thead) return;
+    const rows = thead.querySelectorAll('tr');
+    let cumulativeTop = 0;
+    rows.forEach(row => {
+      // Apply to all th and td in this row
+      row.querySelectorAll('th, td').forEach(cell => {
+        cell.style.top = cumulativeTop + 'px';
+      });
+      cumulativeTop += row.offsetHeight;
+    });
+  }
+
+
+
+  /**
+   * Helper to compute html colspan and rowspan to reproduce spreadsheet mergings
+   */
+  function calculateColAndRowSpan(headers, rowIdx, colIdx) {
+    const val = String(headers[rowIdx][colIdx] || '').trim();
+    
+    // Check if cell is covered by a horizontal merge (look left in the same row)
+    if (colIdx > 0 && val === "") {
+      let backIdx = colIdx - 1;
+      while (backIdx >= 0 && String(headers[rowIdx][backIdx] || '').trim() === "") {
+        backIdx--;
+      }
+      if (backIdx >= 0) {
+        // If we found a cell, let's see if we should hide this one.
+        // In spreadsheet grids, cells that are part of a merge range are read as empty.
+        return { hidden: true };
+      }
+    }
+    
+    // Check if cell is covered by a vertical merge (look up in the same column)
+    if (rowIdx > 0) {
+      let upIdx = rowIdx - 1;
+      while (upIdx >= 0 && String(headers[upIdx][colIdx] || '').trim() === val) {
+        upIdx--;
+      }
+      // If parent rows had the exact same label, this cell is vertically merged
+      if (val === String(headers[rowIdx - 1][colIdx] || '').trim()) {
+        return { hidden: true };
+      }
+    }
+    
+    // Calculate Colspan: Count adjacent empty cells to the right
+    let colspan = 1;
+    for (let c = colIdx + 1; c < headers[rowIdx].length; c++) {
+      if (String(headers[rowIdx][c] || '').trim() === "") {
+        colspan++;
+      } else {
+        break;
+      }
+    }
+    
+    // Calculate Rowspan: Count identical values below in the same column
+    let rowspan = 1;
+    for (let r = rowIdx + 1; r < headers.length; r++) {
+      if (String(headers[r][colIdx] || '').trim() === val) {
+        rowspan++;
+      } else {
+        break;
+      }
+    }
+    
+    return { hidden: false, colspan: colspan, rowspan: rowspan };
+  }
+
+  /**
+   * Applies client-side global and column-based text filtering
+   */
+  function applyFilters(rows) {
+    return rows.filter(row => {
+      // 1. Apply Global Search: checks code (0) and name (1)
+      if (state.globalSearch) {
+        const query = state.globalSearch.toLowerCase();
+        const codeMatch = String(row[0]).toLowerCase().indexOf(query) !== -1;
+        const nameMatch = String(row[1]).toLowerCase().indexOf(query) !== -1;
+        if (!codeMatch && !nameMatch) return false;
+      }
+      
+      // 2. Apply Column-specific filters
+      for (const colIdx in state.columnFilters) {
+        const query = state.columnFilters[colIdx].trim().toLowerCase();
+        if (query) {
+          const cellValStr = String(row[colIdx] || '').toLowerCase();
+          if (cellValStr.indexOf(query) === -1) {
+            return false;
+          }
+        }
+      }
+      
+      return true;
+    });
+  }
+
+  /**
+   * Pagination controls builder
+   */
+  function renderPaginationControls(totalRecords, maxPages) {
+    const container = document.getElementById('table-pagination-controls');
+    if (!container) return;
+    
+    if (totalRecords === 0) {
+      container.innerHTML = '';
+      return;
+    }
+    
+    let html = `
+      <button class="pagination-btn" ${state.currentPage === 1 ? 'disabled' : ''} onclick="gotoPage(1)"><i class="fas fa-angle-double-left"></i></button>
+      <button class="pagination-btn" ${state.currentPage === 1 ? 'disabled' : ''} onclick="gotoPage(${state.currentPage - 1})"><i class="fas fa-angle-left"></i></button>
+    `;
+    
+    // Show surrounding page numbers
+    const startPage = Math.max(1, state.currentPage - 2);
+    const endPage = Math.min(maxPages, state.currentPage + 2);
+    
+    for (let i = startPage; i <= endPage; i++) {
+      html += `<button class="pagination-btn ${state.currentPage === i ? 'active' : ''}" onclick="gotoPage(${i})">${i}</button>`;
+    }
+    
+    html += `
+      <button class="pagination-btn" ${state.currentPage === maxPages ? 'disabled' : ''} onclick="gotoPage(${state.currentPage + 1})"><i class="fas fa-angle-right"></i></button>
+      <button class="pagination-btn" ${state.currentPage === maxPages ? 'disabled' : ''} onclick="gotoPage(${maxPages})"><i class="fas fa-angle-double-right"></i></button>
+    `;
+    
+    container.innerHTML = html;
+  }
+
+  function gotoPage(page) {
+    state.currentPage = page;
+    renderTable();
+  }
+
+  function onGlobalSearchChange() {
+    state.globalSearch = document.getElementById('global-search-input').value;
+    state.currentPage = 1; // reset page on filter
+    renderTable();
+  }
+
+  function onColumnFilterChange(colIdx, val) {
+    if (val.trim() === "") {
+      delete state.columnFilters[colIdx];
+    } else {
+      state.columnFilters[colIdx] = val;
+    }
+    state.currentPage = 1;
+    renderTable();
+  }
+
+  function onPageSizeChange() {
+    state.pageSize = parseInt(document.getElementById('page-size-select').value, 10);
+    state.currentPage = 1;
+    renderTable();
+  }
+
+  function onTableSort(colIdx) {
+    if (state.sortColumn === colIdx) {
+      // Toggle direction
+      state.sortDirection = state.sortDirection === 'asc' ? 'desc' : 'asc';
+    } else {
+      state.sortColumn = colIdx;
+      state.sortDirection = 'asc';
+    }
+    renderTable();
+  }
+
+  /*************************************************************
+   * EXPORTS IMPLEMENTATIONS
+   *************************************************************/
+  function exportToCSV() {
+    const sheetName = state.currentSheet;
+    const sheetMeta = state.metadata.sheets[sheetName];
+    if (!sheetMeta) return;
+    
+    // Prepare headers
+    let csvContent = "";
+    sheetMeta.headers.forEach(headerRow => {
+      const line = headerRow.map(cell => `"${cleanCSVCell(cell)}"`).join(",");
+      csvContent += line + "\r\n";
+    });
+    
+    // Fetch data rows
+    const childRegions = getChildRegions(state.currentCode);
+    let tableRowsData = childRegions.map(child => {
+      const sheetVals = child.data.sheets[sheetName] || [];
+      return [child.code, child.name, ...sheetVals];
+    });
+    
+    // Apply filters
+    tableRowsData = applyFilters(tableRowsData);
+    
+    tableRowsData.forEach(row => {
+      const line = row.map(cell => `"${cleanCSVCell(cell)}"`).join(",");
+      csvContent += line + "\r\n";
+    });
+    
+    // Trigger download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `BPS_SE_Export_${cleanFileName(sheetName)}_${state.currentCode}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    showToast("success", "File CSV berhasil diekspor!");
+  }
+
+  function exportToExcel() {
+    const sheetName = state.currentSheet;
+    const sheetMeta = state.metadata.sheets[sheetName];
+    if (!sheetMeta) return;
+    
+    // Build array grid
+    const sheetData = [];
+    
+    // Title/Metadata row
+    sheetData.push(["Laporan Pendataan Sensus Ekonomi BPS Kebumen"]);
+    sheetData.push([`Sheet: ${sheetName}`, `Wilayah: ${state.regions[state.currentCode].name} (${state.currentCode})`]);
+    sheetData.push([`Tanggal Ekspor: ${new Date().toLocaleDateString('id-ID')}`]);
+    sheetData.push([]); // blank spacing row
+    
+    // Headers
+    sheetMeta.headers.forEach(hRow => {
+      sheetData.push(hRow);
+    });
+    
+    // Fetch data rows
+    const childRegions = getChildRegions(state.currentCode);
+    let tableRowsData = childRegions.map(child => {
+      const sheetVals = child.data.sheets[sheetName] || [];
+      return [child.code, child.name, ...sheetVals];
+    });
+    
+    tableRowsData = applyFilters(tableRowsData);
+    tableRowsData.forEach(row => {
+      // Map cells and preserve numeric formatting for Excel
+      const parsedRow = row.map((cell, idx) => {
+        if (idx >= 2) return safeParseNumber(cell);
+        return cell;
+      });
+      sheetData.push(parsedRow);
+    });
+    
+    // SheetJS Workbook creation
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(sheetData);
+    
+    // Apply sheet merge grids if required, but default SheetJS is already clean
+    XLSX.utils.book_append_sheet(wb, ws, "Data Monitoring");
+    
+    const fileName = `BPS_SE_${cleanFileName(sheetName)}_${state.currentCode}.xlsx`;
+    XLSX.writeFile(wb, fileName);
+    showToast("success", "File Excel (.xlsx) berhasil diekspor!");
+  }
+
+  function exportToCopy() {
+    const table = document.getElementById('data-table-element');
+    const range = document.createRange();
+    range.selectNode(table);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    
+    try {
+      document.execCommand('copy');
+      window.getSelection().removeAllRanges();
+      showToast("success", "Tabel berhasil disalin ke clipboard!");
+    } catch (err) {
+      showToast("danger", "Gagal menyalin tabel.");
+    }
+  }
+
+  function exportToPrint() {
+    const sheetName = state.currentSheet;
+    const regionName = state.regions[state.currentCode].name;
+    const printWindow = window.open('', '', 'height=600,width=800');
+    
+    let tableHtml = document.getElementById('data-table-element').outerHTML;
+    
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Cetak Data BPS - ${sheetName}</title>
+          <style>
+            body { font-family: sans-serif; font-size: 11px; padding: 20px; }
+            h2 { color: #0a3c91; margin-bottom: 2px; }
+            h4 { color: #555; margin-top: 0; }
+            table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+            th, td { border: 1px solid #ddd; padding: 6px; text-align: left; }
+            th { background-color: #f2f2f2; font-weight: bold; }
+            .text-right { text-align: right; }
+            .column-filter-row { display: none; } /* hide filters on print */
+          </style>
+        </head>
+        <body>
+          <h2>Laporan Monitoring Pendataan SE BPS Kebumen</h2>
+          <h4>Sheet: ${sheetName} | Wilayah: ${regionName} (${state.currentCode})</h4>
+          ${tableHtml}
+          <script>window.print(); window.close();<\/script>
+        </body>
+      </html>
+    `);
+    
+    printWindow.document.close();
+  }
+
+  function cleanCSVCell(val) {
+    if (val === undefined || val === null) return "";
+    return String(val).replace(/"/g, '""');
+  }
+
+  function cleanFileName(str) {
+    return String(str).replace(/[^a-zA-Z0-9]/g, "_");
+  }
+
+  /*************************************************************
+   * COMPARE REGION VIEW RENDERING LOGIC
+   *************************************************************/
+  function populateCompareDropdownOptions() {
+    const dropdown = document.getElementById('compare-regions-dropdown');
+    if (!dropdown) return;
+    
+    const activeLevel = parseInt(document.getElementById('compare-level-select').value, 10);
+    
+    // Fetch all regions in activeLevel (1 for Kecamatan, 2 for Desa)
+    const options = [];
+    for (const code in state.regions) {
+      const reg = state.regions[code];
+      if (reg.level === activeLevel) {
+        options.push({ code, name: reg.name });
+      }
+    }
+    
+    // Sort names alphabetically
+    options.sort((a,b) => a.name.localeCompare(b.name));
+    
+    let html = '';
+    options.forEach(opt => {
+      const isChecked = state.compareSelected.includes(opt.code) ? 'checked' : '';
+      html += `
+        <div class="multi-option" onclick="toggleCompareOption('${opt.code}', event)">
+          <input type="checkbox" id="chk-compare-${opt.code}" ${isChecked} onclick="event.stopPropagation()">
+          <label style="cursor:pointer;" onclick="event.preventDefault()">${opt.name} (${opt.code})</label>
+        </div>
+      `;
+    });
+    
+    dropdown.innerHTML = html;
+    
+    // Update trigger labels
+    updateCompareTriggerText();
+  }
+
+  function onCompareLevelChange() {
+    // Clear selections and rebuild dropdown options
+    state.compareSelected = [];
+    populateCompareDropdownOptions();
+    renderCompareBadges();
+    
+    // Hide results section
+    document.getElementById('compare-results-section').style.display = 'none';
+    document.getElementById('compare-empty-state').style.display = 'block';
+  }
+
+  function toggleCompareDropdown(event) {
+    event.stopPropagation();
+    const dropdown = document.getElementById('compare-regions-dropdown');
+    dropdown.classList.toggle('open');
+    
+    // Add close listener
+    if (dropdown.classList.contains('open')) {
+      document.addEventListener('click', closeCompareDropdown);
+    }
+  }
+
+  function closeCompareDropdown() {
+    document.getElementById('compare-regions-dropdown').classList.remove('open');
+    document.removeEventListener('click', closeCompareDropdown);
+  }
+
+  function toggleCompareOption(code, event) {
+    event.stopPropagation();
+    const idx = state.compareSelected.indexOf(code);
+    const chk = document.getElementById(`chk-compare-${code}`);
+    
+    if (idx === -1) {
+      state.compareSelected.push(code);
+      if (chk) chk.checked = true;
+    } else {
+      state.compareSelected.splice(idx, 1);
+      if (chk) chk.checked = false;
+    }
+    
+    updateCompareTriggerText();
+    renderCompareBadges();
+  }
+
+  function updateCompareTriggerText() {
+    const trigger = document.getElementById('compare-regions-trigger').querySelector('span');
+    const count = state.compareSelected.length;
+    
+    if (count === 0) {
+      trigger.innerText = "Pilih wilayah...";
+    } else {
+      trigger.innerText = `${count} wilayah dipilih`;
+    }
+  }
+
+  function renderCompareBadges() {
+    const container = document.getElementById('compare-selected-badges');
+    let html = '';
+    
+    state.compareSelected.forEach(code => {
+      const reg = state.regions[code];
+      if (reg) {
+        html += `
+          <div style="background:var(--primary); color:white; padding:4px 10px; border-radius:20px; font-size:0.75rem; font-weight:600; display:inline-flex; align-items:center; gap:6px;">
+            ${reg.name}
+            <i class="fas fa-times-circle" style="cursor:pointer;" onclick="removeCompareSelected('${code}')"></i>
+          </div>
+        `;
+      }
+    });
+    
+    container.innerHTML = html;
+  }
+
+  function removeCompareSelected(code) {
+    const idx = state.compareSelected.indexOf(code);
+    if (idx !== -1) {
+      state.compareSelected.splice(idx, 1);
+      const chk = document.getElementById(`chk-compare-${code}`);
+      if (chk) chk.checked = false;
+      updateCompareTriggerText();
+      renderCompareBadges();
+    }
+  }
+
+  function runCompare() {
+    if (state.compareSelected.length < 2) {
+      showToast("warning", "Pilih minimal 2 wilayah untuk dibandingkan!");
+      return;
+    }
+    
+    showLoading(true, "Menganalisis Perbandingan...");
+    
+    // Reveal results panel
+    document.getElementById('compare-empty-state').style.display = 'none';
+    document.getElementById('compare-results-section').style.display = 'block';
+    
+    const selectedRegions = state.compareSelected.map(code => {
+      return {
+        code: code,
+        name: state.regions[code].name,
+        data: state.regions[code]
+      };
+    });
+    
+    // 1. Render comparative KPIs side-by-side
+    renderCompareKPIs(selectedRegions);
+    
+    // 2. Render comparative Charts
+    renderCompareProgressChart(selectedRegions);
+    renderCompareSkalaChart(selectedRegions);
+    renderCompareSektorChart(selectedRegions);
+    
+    // 3. Render comparative data Table
+    renderCompareTable(selectedRegions);
+    
+    showLoading(false);
+    showToast("success", "Perbandingan berhasil dimuat!");
+  }
+
+  function renderCompareKPIs(selectedRegions) {
+    const container = document.getElementById('compare-kpis-container');
+    const progMeta = state.metadata.sheets["PROGRES PENDATAAN"];
+    
+    let html = '';
+    selectedRegions.forEach(reg => {
+      let pct = 0;
+      let didata = 0;
+      if (progMeta && reg.data.sheets["PROGRES PENDATAAN"]) {
+        const vals = reg.data.sheets["PROGRES PENDATAAN"];
+        const prelist = safeGetCellNumber(vals, progMeta.keyColumns.prelist);
+        didata = safeGetCellNumber(vals, progMeta.keyColumns.didata);
+        pct = prelist > 0 ? (didata / prelist) * 100 : 0;
+      }
+      
+      html += `
+        <div class="kpi-card">
+          <div class="kpi-info" style="width:100%;">
+            <h4>${reg.name}</h4>
+            <div class="kpi-value" style="font-size:1.45rem;">${pct.toFixed(2)}%</div>
+            <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px;">Didata: ${formatIndonesianNumber(didata)} usaha</div>
+            <div style="font-size: 0.72rem; background-color: #e9ecef; border-radius: 4px; height: 6px; margin-top: 8px; overflow: hidden;">
+              <div style="background-color: var(--accent); width: ${Math.min(pct, 100)}%; height: 100%;"></div>
+            </div>
+          </div>
+        </div>
+      `;
+    });
+    
+    container.innerHTML = html;
+  }
+
+  function renderCompareProgressChart(selectedRegions) {
+    const ctx = document.getElementById('chart-compare-progress').getContext('2d');
+    if (charts.compareProgress) charts.compareProgress.destroy();
+    
+    const progMeta = state.metadata.sheets["PROGRES PENDATAAN"];
+    const labels = selectedRegions.map(x => x.name);
+    const data = selectedRegions.map(reg => {
+      if (progMeta && reg.data.sheets["PROGRES PENDATAAN"]) {
+        const vals = reg.data.sheets["PROGRES PENDATAAN"];
+        const pre = safeGetCellNumber(vals, progMeta.keyColumns.prelist);
+        const did = safeGetCellNumber(vals, progMeta.keyColumns.didata);
+        return pre > 0 ? (did / pre) * 100 : 0;
+      }
+      return 0;
+    });
+    
+    charts.compareProgress = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Progres Selesai (%)',
+          data: data,
+          backgroundColor: '#f78c00',
+          borderColor: '#d46b00',
+          borderWidth: 1,
+          borderRadius: 5
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          y: { beginAtZero: true, max: 100 }
+        }
+      }
+    });
+  }
+
+  function renderCompareSkalaChart(selectedRegions) {
+    const ctx = document.getElementById('chart-compare-skala').getContext('2d');
+    if (charts.compareSkala) charts.compareSkala.destroy();
+    
+    const meta = state.metadata.sheets["SKALA USAHA"];
+    const labels = selectedRegions.map(x => x.name);
+    
+    const ubs = [];
+    const ums = [];
+    const umks = [];
+    
+    selectedRegions.forEach(reg => {
+      const vals = reg.data.sheets["SKALA USAHA"];
+      let ub = 0, um = 0, umk = 0;
+      if (meta && vals) {
+        ub = safeGetCellNumber(vals, meta.keyColumns.prelist_ub);
+        um = safeGetCellNumber(vals, meta.keyColumns.prelist_um);
+        umk = safeGetCellNumber(vals, meta.keyColumns.prelist_umk);
+      }
+      ubs.push(ub);
+      ums.push(um);
+      umks.push(umk);
+    });
+    
+    charts.compareSkala = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [
+          { label: 'UB',  data: ubs,  backgroundColor: '#0a3c91' },
+          { label: 'UM',  data: ums,  backgroundColor: '#f78c00' },
+          { label: 'UMK', data: umks, backgroundColor: '#20c997' }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+  }
+
+  function renderCompareSektorChart(selectedRegions) {
+    const ctx = document.getElementById('chart-compare-sektor').getContext('2d');
+    if (charts.compareSektor) charts.compareSektor.destroy();
+    
+    const meta = state.metadata.sheets["PROPORSI PERTANIAN NON PERTANIA"];
+    const labels = selectedRegions.map(x => x.name);
+    
+    const tanis = [];
+    const nontanis = [];
+    
+    selectedRegions.forEach(reg => {
+      const vals = reg.data.sheets["PROPORSI PERTANIAN NON PERTANIA"];
+      let tani = 0, nontani = 0;
+      if (meta && vals) {
+        tani = safeGetCellNumber(vals, meta.keyColumns.bku_ditemukan_tani) +
+               safeGetCellNumber(vals, meta.keyColumns.bku_baru_tani) +
+               safeGetCellNumber(vals, meta.keyColumns.kel_ditemukan_tani) +
+               safeGetCellNumber(vals, meta.keyColumns.kel_baru_tani);
+               
+        nontani = safeGetCellNumber(vals, meta.keyColumns.bku_ditemukan_nontani) +
+                  safeGetCellNumber(vals, meta.keyColumns.bku_baru_nontani) +
+                  safeGetCellNumber(vals, meta.keyColumns.kel_ditemukan_nontani) +
+                  safeGetCellNumber(vals, meta.keyColumns.kel_baru_nontani);
+      }
+      tanis.push(tani);
+      nontanis.push(nontani);
+    });
+    
+    charts.compareSektor = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [
+          { label: 'Pertanian', data: tanis, backgroundColor: '#198754' },
+          { label: 'Non Pertanian', data: nontanis, backgroundColor: '#6f42c1' }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+  }
+
+  function renderCompareTable(selectedRegions) {
+    const head = document.querySelector('#compare-data-table thead');
+    const body = document.getElementById('compare-data-table-body');
+    
+    // Dynamic columns definition for comparison table
+    const cols = [
+      "Kode Wilayah", 
+      "Nama Wilayah", 
+      "Prelist Progres", 
+      "Didata Progres", 
+      "Progress %", 
+      "Usaha BKU (UB)", 
+      "Usaha BKU (UM)", 
+      "Usaha BKU (UMK)",
+      "Sektor Pertanian",
+      "Sektor Non Pertanian"
+    ];
+    
+    let headHtml = '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>';
+    head.innerHTML = headHtml;
+    
+    const progMeta = state.metadata.sheets["PROGRES PENDATAAN"];
+    const skalaMeta = state.metadata.sheets["SKALA USAHA"];
+    const taniMeta = state.metadata.sheets["PROPORSI PERTANIAN NON PERTANIA"];
+    
+    let bodyHtml = '';
+    selectedRegions.forEach(reg => {
+      const valsProg = reg.data.sheets["PROGRES PENDATAAN"];
+      const valsSkala = reg.data.sheets["SKALA USAHA"];
+      const valsTani = reg.data.sheets["PROPORSI PERTANIAN NON PERTANIA"];
+      
+      let prelist = 0, didata = 0, pct = 0;
+      if (progMeta && valsProg) {
+        prelist = safeGetCellNumber(valsProg, progMeta.keyColumns.prelist);
+        didata = safeGetCellNumber(valsProg, progMeta.keyColumns.didata);
+        pct = prelist > 0 ? (didata / prelist) * 100 : 0;
+      }
+      
+      let ub = 0, um = 0, umk = 0;
+      if (skalaMeta && valsSkala) {
+        ub = safeGetCellNumber(valsSkala, skalaMeta.keyColumns.prelist_ub);
+        um = safeGetCellNumber(valsSkala, skalaMeta.keyColumns.prelist_um);
+        umk = safeGetCellNumber(valsSkala, skalaMeta.keyColumns.prelist_umk);
+      }
+      
+      let tani = 0, nontani = 0;
+      if (taniMeta && valsTani) {
+        tani = safeGetCellNumber(valsTani, taniMeta.keyColumns.bku_ditemukan_tani) +
+               safeGetCellNumber(valsTani, taniMeta.keyColumns.bku_baru_tani) +
+               safeGetCellNumber(valsTani, taniMeta.keyColumns.kel_ditemukan_tani) +
+               safeGetCellNumber(valsTani, taniMeta.keyColumns.kel_baru_tani);
+               
+        nontani = safeGetCellNumber(valsTani, taniMeta.keyColumns.bku_ditemukan_nontani) +
+                  safeGetCellNumber(valsTani, taniMeta.keyColumns.bku_baru_nontani) +
+                  safeGetCellNumber(valsTani, taniMeta.keyColumns.kel_ditemukan_nontani) +
+                  safeGetCellNumber(valsTani, taniMeta.keyColumns.kel_baru_nontani);
+      }
+      
+      bodyHtml += `
+        <tr>
+          <td><strong>${reg.code}</strong></td>
+          <td><strong>${reg.name}</strong></td>
+          <td class="text-right">${formatIndonesianNumber(prelist)}</td>
+          <td class="text-right">${formatIndonesianNumber(didata)}</td>
+          <td class="text-right">${pct.toFixed(2)}%</td>
+          <td class="text-right">${formatIndonesianNumber(ub)}</td>
+          <td class="text-right">${formatIndonesianNumber(um)}</td>
+          <td class="text-right">${formatIndonesianNumber(umk)}</td>
+          <td class="text-right">${formatIndonesianNumber(tani)}</td>
+          <td class="text-right">${formatIndonesianNumber(nontani)}</td>
+        </tr>
+      `;
+    });
+    
+    body.innerHTML = bodyHtml;
+  }
+
+  function renderCompareView() {
+    populateCompareDropdownOptions();
+    renderCompareBadges();
+    
+    if (state.compareSelected.length >= 2) {
+      // Re-trigger calculation automatically on navigation if selection exists
+      runCompare();
+    } else {
+      document.getElementById('compare-results-section').style.display = 'none';
+      document.getElementById('compare-empty-state').style.display = 'block';
+    }
+  }
+
+  /*************************************************************
+   * DATA VALIDATION & AUDIT REPORTS RENDERING
+   *************************************************************/
+  function renderAuditReport(audit) {
+    if (!audit || !audit.warnings) return;
+
+    const banner = document.getElementById('audit-summary-banner');
+    const title = document.getElementById('audit-banner-title');
+    const desc = document.getElementById('audit-banner-desc');
+    const icon = document.getElementById('audit-banner-icon');
+    const badge = document.getElementById('audit-badge-counter');
+    
+    const tableCard = document.getElementById('audit-table-card');
+    const tbody = document.getElementById('audit-warnings-table-body');
+    const emptyState = document.getElementById('audit-empty-state');
+    
+    const count = audit.warnings.length;
+    
+    // Update counter bubble on sidebar
+    if (badge) {
+      if (count > 0) {
+        badge.innerText = count;
+        badge.style.display = 'inline-block';
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+    
+    if (count === 0) {
+      if (banner) banner.className = "audit-summary-bar pass";
+      if (title) title.innerText = "Pemeriksaan Selesai: Kualitas Data Bersih";
+      if (desc) desc.innerText = "0 Peringatan Ditemukan";
+      if (icon) icon.className = "fas fa-check-circle";
+      
+      if (tableCard) tableCard.style.display = 'none';
+      if (emptyState) emptyState.style.display = 'block';
+      return;
+    }
+    
+    // Display warnings
+    if (banner) banner.className = "audit-summary-bar danger";
+    if (title) title.innerText = "Kualitas Data Perlu Ditinjau!";
+    if (desc) desc.innerText = `${count} Peringatan Data Bermasalah`;
+    if (icon) icon.className = "fas fa-exclamation-circle";
+    
+    if (tableCard) tableCard.style.display = 'block';
+    if (emptyState) emptyState.style.display = 'none';
+    
+    if (tbody) {
+      let html = '';
+      audit.warnings.forEach((warn, idx) => {
+        html += `
+          <tr>
+            <td>${idx + 1}</td>
+            <td><strong style="color:var(--primary);">${warn.sheet || '-'}</strong></td>
+            <td>${warn.row > 0 ? warn.row : '-'}</td>
+            <td><code>${warn.code || '-'}</code></td>
+            <td>${warn.code ? (state.regions[warn.code] ? state.regions[warn.code].name : 'Tidak dikenal') : '-'}</td>
+            <td>${warn.column ? 'Kolom ' + warn.column : '-'}</td>
+            <td><span style="color:var(--danger); font-weight:600;">${warn.error || warn.issue || '-'}</span></td>
+            <td><code>${warn.value !== undefined ? warn.value : ''}</code></td>
+          </tr>
+        `;
+      });
+      tbody.innerHTML = html;
+    }
+  }
+
+  /*************************************************************
+   * SYSTEM-WIDE MANUAL REFRESH CACHE LOGIC
+   *************************************************************/
+  function refreshCacheData() {
+    const btn = document.getElementById('btn-sidebar-refresh') || document.getElementById('refresh-cache-btn');
+    const icon = document.getElementById('refresh-icon');
+    const textLabel = document.getElementById('refresh-btn-text');
+    
+    if (btn) btn.disabled = true;
+    if (icon) icon.classList.add('fa-spin');
+    if (textLabel) textLabel.innerText = "Menyinkronkan...";
+    
+    showLoading(true, "Membaca Spreadsheet & membangun ulang Master Cache Google Drive...");
+    showToast("warning", "Proses sinkronisasi Master Cache dimulai...");
+    
+    google.script.run
+      .withSuccessHandler((responseJson) => {
+        const response = typeof responseJson === 'string' ? JSON.parse(responseJson) : responseJson;
+        
+        if (btn) btn.disabled = false;
+        if (icon) icon.classList.remove('fa-spin');
+        if (textLabel) textLabel.innerText = "Segarkan Data Cache";
+        showLoading(false);
+        
+        if (response.status === "success") {
+          showToast("success", response.message || "Penyegaran data berhasil!");
+          // Re-load application with new cached values
+          initApp();
+        } else {
+          showToast("danger", "Gagal menyegarkan: " + response.message);
+        }
+      })
+      .withFailureHandler((err) => {
+        if (btn) btn.disabled = false;
+        if (icon) icon.classList.remove('fa-spin');
+        if (textLabel) textLabel.innerText = "Segarkan Data Cache";
+        showLoading(false);
+        const errMsg = err ? (err.message || String(err)) : "Koneksi terputus";
+        showToast("danger", "Gagal menghubungi server: " + errMsg);
+      })
+      .triggerRefreshCacheServer();
+  }
+
+  /*************************************************************
+   * UI HELPER UTILS & TOASTS
+   *************************************************************/
+  function showLoading(show, text = "Memuat...") {
+    const overlay = document.getElementById('loading-overlay');
+    if (!overlay) return;
+    
+    if (show) {
+      const txt = overlay.querySelector('.loading-text');
+      if (txt) txt.innerText = text;
+      overlay.style.display = 'flex';
+    } else {
+      overlay.style.display = 'none';
+      if (globalMsgTimer) {
+        clearInterval(globalMsgTimer);
+        globalMsgTimer = null;
+      }
+    }
+  }
+
+  function showToast(type, message) {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    
+    let iconClass = 'fa-info-circle';
+    if (type === 'success') iconClass = 'fa-check-circle';
+    if (type === 'warning') iconClass = 'fa-exclamation-triangle';
+    if (type === 'danger') iconClass = 'fa-exclamation-circle';
+    
+    toast.innerHTML = `
+      <div class="toast-content">
+        <i class="fas ${iconClass} toast-icon"></i>
+        <span class="toast-message">${message}</span>
+      </div>
+      <button class="toast-close" onclick="this.parentElement.remove()">&times;</button>
+    `;
+    
+    container.appendChild(toast);
+    
+    // Auto-remove after 4.5 seconds
+    setTimeout(() => {
+      toast.style.animation = 'slideInRight 0.35s reverse forwards';
+      setTimeout(() => toast.remove(), 350);
+    }, 4500);
+  }
+
+  function showErrorBanner(msg) {
+    showLoading(false); // Force hide loading overlay!
+    const container = document.getElementById('content-area');
+    if (container) {
+      container.innerHTML = `
+        <div class="alert-banner" style="background:#f8d7da; color:#721c24; border:1px solid #f5c6cb; padding:24px; border-radius:12px; margin:20px 0; box-shadow: 0 4px 12px rgba(0,0,0,0.08);">
+          <div style="display:flex; align-items:flex-start; gap:16px;">
+            <i class="fas fa-exclamation-triangle" style="font-size: 2.2rem; color:#dc3545; flex-shrink:0; margin-top:4px;"></i>
+            <div style="flex-grow:1;">
+              <strong style="display:block; font-size:1.15rem; margin-bottom:6px; color:#842029;">Gagal Memuat Data Spreadsheet!</strong>
+              <p style="font-size:0.92rem; margin-bottom:14px; line-height:1.5;">${msg}</p>
+              
+              <div style="font-size:0.85rem; background:rgba(255,255,255,0.7); padding:12px 16px; border-radius:8px; margin-bottom:16px; border:1px solid #f5c6cb;">
+                <strong style="color:#842029; display:block; margin-bottom:4px;">Solusi / Langkah Perbaikan:</strong>
+                <ol style="margin-left:18px; line-height:1.6;">
+                  <li>Jika Anda membuat Script secara <strong>Standalone</strong> (dari script.google.com, bukan dari menu Extensions di Spreadsheet), buka file <code>Config.gs</code> dan masukkan <strong>SPREADSHEET_ID</strong> Anda.</li>
+                  <li>Pastikan akun Google Anda memiliki akses untuk membuka file Spreadsheet tersebut.</li>
+                  <li>Klik tombol <strong>"Coba Lagi"</strong> di bawah untuk memuat ulang.</li>
+                </ol>
+              </div>
+              
+              <button class="btn btn-primary" onclick="initApp()" style="padding:8px 20px; font-weight:600; cursor:pointer;">
+                <i class="fas fa-sync-alt" style="margin-right:6px;"></i> Coba Lagi
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+  }
+
+  // Pure Number Formatting Helpers
+  function formatIndonesianNumber(num) {
+    if (num === undefined || num === null || num === "") return "0";
+    return new Intl.NumberFormat('id-ID').format(num);
+  }
+
+  function safeParseNumber(val) {
+    if (val === undefined || val === null || val === "") return 0;
+    if (typeof val === 'number') return val;
+    // Remove space, dots and replace comma decimal with period
+    const str = String(val).trim().replace(/\s/g, "").replace(/\./g, "").replace(/,/g, ".");
+    const num = parseFloat(str);
+    return isNaN(num) ? 0 : num;
+  }
+
+  function safeGetCellNumber(cellValues, idx) {
+    if (idx === undefined || idx - 2 < 0 || idx - 2 >= cellValues.length) return 0;
+    return safeParseNumber(cellValues[idx - 2]);
+  }
+
+  function cleanId(str) {
+    return String(str).replace(/[^a-zA-Z0-9]/g, "");
+  }
+
+  function escapeJsString(str) {
+    return String(str).replace(/'/g, "\\'");
+  }
+</script>

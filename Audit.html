@@ -1,0 +1,82 @@
+<!-- Audit.html -->
+<div id="view-audit" class="page-view">
+  <!-- Header Row -->
+  <div class="nav-header-row">
+    <div>
+      <h2 style="font-weight: 800; font-size: 1.25rem; color: var(--primary); margin-bottom: 4px;">Audit Kualitas Data</h2>
+      <div style="font-size: 0.85rem; color: var(--text-muted);">
+        Hasil pemeriksaan otomatis kualitas data spreadsheet berdasarkan aturan integrasi dan konsistensi.
+      </div>
+    </div>
+  </div>
+
+  <!-- Audit Status Summary Banner -->
+  <div class="audit-summary-bar pass" id="audit-summary-banner">
+    <div class="audit-title">
+      <i class="fas fa-check-circle" id="audit-banner-icon"></i>
+      <span id="audit-banner-title">Pemeriksaan Selesai: Kualitas Data Baik</span>
+    </div>
+    <div style="font-size: 0.88rem; font-weight: 600;" id="audit-banner-desc">
+      0 Peringatan Ditemukan
+    </div>
+  </div>
+
+  <!-- Audit Info Explanation -->
+  <div class="table-card" style="margin-bottom: 24px;">
+    <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--primary); margin-bottom: 12px; border-bottom: 1px solid #f1f3f5; padding-bottom: 8px;">
+      <i class="fas fa-info-circle" style="margin-right: 6px;"></i>Aturan Validasi Kualitas Data
+    </h3>
+    <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">
+      Sistem secara otomatis mengaudit data spreadsheet pada setiap proses *Refresh Data* menggunakan aturan-aturan berikut:
+    </p>
+    <ul style="font-size: 0.82rem; color: var(--text-muted); padding-left: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px;">
+      <li><i class="fas fa-check text-success" style="margin-right: 6px; color: var(--success);"></i> <strong>Kode Unik</strong>: Mendeteksi duplikasi kode wilayah di sheet yang sama.</li>
+      <li><i class="fas fa-check text-success" style="margin-right: 6px; color: var(--success);"></i> <strong>Nama & Kode Lengkap</strong>: Memastikan tidak ada sel kode atau nama wilayah yang kosong.</li>
+      <li><i class="fas fa-check text-success" style="margin-right: 6px; color: var(--success);"></i> <strong>Nilai Negatif</strong>: Memeriksa angka prelist/pendataan yang bernilai negatif.</li>
+      <li><i class="fas fa-check text-success" style="margin-right: 6px; color: var(--success);"></i> <strong>Persentase Logis</strong>: Persentase harus berada di rentang 0% hingga 100%.</li>
+      <li><i class="fas fa-check text-success" style="margin-right: 6px; color: var(--success);"></i> <strong>Integrasi Sheet</strong>: Memastikan total prelist & usaha konsisten lintas sheet (e.g. SKALA vs KESELURUHAN).</li>
+      <li><i class="fas fa-check text-success" style="margin-right: 6px; color: var(--success);"></i> <strong>Relasi Geografis</strong>: Kode harus terdaftar konsisten di semua sheet data.</li>
+    </ul>
+  </div>
+
+  <!-- Audit Warnings Table (Hidden if 0 warnings) -->
+  <div class="table-card" id="audit-table-card" style="display: none;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+      <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--primary);">
+        <i class="fas fa-exclamation-triangle" style="color: var(--danger); margin-right: 6px;"></i>Daftar Peringatan Data Bermasalah
+      </h3>
+      <div style="font-size: 0.8rem; color: var(--text-muted); background-color: var(--light-bg); padding: 4px 10px; border-radius: 4px; border: 1px solid #dee2e6;">
+        Penyebab diperlihatkan di bawah ini. Harap perbaiki sel terkait pada Google Sheet Anda.
+      </div>
+    </div>
+    
+    <div class="table-scroll-container">
+      <table class="bps-data-table" id="audit-warnings-table">
+        <thead>
+          <tr>
+            <th style="width: 50px;">No</th>
+            <th>Nama Sheet</th>
+            <th style="width: 70px;">Baris</th>
+            <th style="width: 140px;">Kode Wilayah</th>
+            <th>Nama Wilayah</th>
+            <th style="width: 80px;">Kolom</th>
+            <th>Jenis Kesalahan</th>
+            <th>Nilai Bermasalah</th>
+          </tr>
+        </thead>
+        <tbody id="audit-warnings-table-body">
+          <!-- Injected dynamically -->
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Audit Empty State (if 0 warnings) -->
+  <div id="audit-empty-state" class="table-card" style="padding: 60px 24px; text-align: center;">
+    <i class="fas fa-clipboard-check" style="font-size: 3.5rem; color: rgba(25, 135, 84, 0.1); margin-bottom: 16px;"></i>
+    <h3 style="font-weight: 700; color: var(--text-main); margin-bottom: 6px;">Data Bersih & Valid</h3>
+    <p style="color: var(--text-muted); max-width: 450px; margin: 0 auto; font-size: 0.88rem;">
+      Audit kualitas data tidak menemukan inkonsistensi, nilai negatif, kode duplikat, atau sel kosong di spreadsheet Anda. Data siap digunakan dengan aman.
+    </p>
+  </div>
+</div>
